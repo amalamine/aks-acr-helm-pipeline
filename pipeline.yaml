@@ -1,0 +1,265 @@
+# 1) build docker images
+
+# 2) push docker images to ACR
+
+# 3) package Helm charts 
+
+# 4) push Helm packages to ACR
+
+# 5) publish image+helm chart to Azure Kubernetes Service (AKS).
+
+
+
+trigger:
+
+- main
+
+
+
+resources:
+
+- repo: self
+
+
+
+# substitute your own variables 
+
+variables:
+
+  azureSubscription: azure
+
+  azureResourceGroup: aks-helm-pipeline
+
+  acrName: akshelmpipeline
+
+  kubernetesCluster: aks-helm-pipeline
+
+  AKS.Deploy: true                     
+
+  registry: $(acrName).azurecr.io       
+
+  ACR.Deploy: true                     
+
+
+
+stages:
+
+- stage: build
+
+  displayName: Build & push Docker images and Helm charts to ACR
+
+  jobs:
+
+  - job: build
+
+    strategy:
+
+      matrix:
+
+        MyWebAPI:
+
+          repository: mywebapi
+
+          repositoryExact: MyWebAPI
+
+        # add additional builds in here...
+
+    pool:
+
+      vmImage: ubuntu-latest
+
+    steps:
+
+    - task: DockerInstaller@0
+
+      displayName: Docker Installer
+
+      inputs:
+
+        dockerVersion: 17.09.0-ce
+
+        releaseType: stable
+
+
+
+    - task: Docker@1
+
+      displayName: 'Build image $(repository):latest'
+
+      inputs:
+
+        containerregistrytype: 'Azure Container Registry'
+
+        azureSubscriptionEndpoint: 'azure'
+
+        azureContainerRegistry: '$(acrName)'
+
+        command: 'Build an Image'
+
+        dockerFile: '$(repositoryExact)/Dockerfile'
+
+        imageName: '$(registry)/$(repository):latest'
+
+        useDefaultContext: false
+
+
+
+    - task: Docker@1
+
+      displayName: 'Push image $(repository):latest'
+
+      condition: and(succeeded(), eq(variables['ACR.Deploy'], 'true'))
+
+      inputs:
+
+        containerregistrytype: 'Azure Container Registry'
+
+        azureSubscriptionEndpoint: 'azure'
+
+        azureContainerRegistry: '$(acrName)'
+
+        command: 'Push an Image'
+
+        imageName: '$(repository):latest'
+
+
+
+    - task: HelmInstaller@0
+
+      displayName: Install Helm 2.11.0
+
+      inputs:
+
+        helmVersion: 2.11.0
+
+
+
+    - task: HelmDeploy@0
+
+      displayName: helm package
+
+      condition: and(succeeded(), eq(variables['ACR.Deploy'], 'true'))
+
+      inputs:
+
+        azureSubscription: $(azureSubscription)
+
+        azureResourceGroup: $(azureResourceGroup)
+
+        azureSubscriptionForACR: $(azureSubscription)
+
+        azureResourceGroupForACR: $(azureResourceGroup)
+
+        azureContainerRegistry: $(acrName)
+
+        kubernetesCluster: $(kubernetesCluster)
+
+        command: package
+
+        chartPath: $(repositoryExact)/charts/$(repository)
+
+        chartVersion: $(Build.BuildId)
+
+        destination: $(Build.ArtifactStagingDirectory)
+
+
+
+    - task: AzureCLI@1
+
+      displayName: Push helm chart
+
+      condition: and(succeeded(), eq(variables['ACR.Deploy'], 'true'))
+
+      inputs:
+
+        azureSubscription: $(azureSubscription)
+
+        scriptLocation: inlineScript
+
+        inlineScript: az acr helm push -n $(acrName) $(Build.ArtifactStagingDirectory)/$(repository)-$(Build.BuildId).tgz
+
+
+
+            
+
+- stage: deploy
+
+  dependsOn: build
+
+  jobs:
+
+  - job: deploy
+
+    displayName: Deploy to AKS via Helm Charts stored in ACR
+
+    condition: and(succeeded(), eq(variables['AKS.Deploy'], 'true'))
+
+    strategy:
+
+      matrix:
+
+        MyWebAPI:
+
+          repository: mywebapi
+
+          repositoryExact: MyWebAPI
+
+    pool:
+
+      vmImage: ubuntu-latest
+
+    steps:
+
+
+
+    - task: HelmInstaller@0
+
+      displayName: Install Helm 2.11.0
+
+      inputs:
+
+        helmVersion: 2.11.0
+
+
+
+    - task: AzureCLI@1
+
+      displayName: az acr helm repo add -n $(acrName)
+
+      inputs:
+
+        azureSubscription: $(azureSubscription)
+
+        scriptLocation: inlineScript
+
+        inlineScript: az acr helm repo add -n $(acrName) --verbose
+
+
+
+    - task: HelmDeploy@0
+
+      displayName: helm upgrade $(acrName)/$(repository) --install --force --version $(Build.BuildId) --set image.tag=latest
+
+      inputs:
+
+        connectionType: Azure Resource Manager
+
+        azureSubscription: $(azureSubscription)
+
+        azureResourceGroup: $(azureResourceGroup)
+
+        azureSubscriptionForACR: $(azureSubscription)
+
+        azureResourceGroupForACR: $(azureResourceGroup)
+
+        azureContainerRegistry: $(acrName)
+
+        kubernetesCluster: $(kubernetesCluster)
+
+        command: upgrade
+
+        chartName: $(acrName)/$(repository) 
+
+        releaseName: $(repository)
+
+        arguments: --install --force --version $(Build.BuildId) --set image.tag=latest
